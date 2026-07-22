@@ -5,11 +5,11 @@ import { classifyWaste, findWasteItems } from "../repositories/waste-repository.
 const listSchema = z.object({
   query: z.string().trim().min(1).max(80).optional(),
   limit: z.coerce.number().int().min(1).max(200).default(100),
-});
+}).strict();
 
 const classifySchema = z.object({
   query: z.string().trim().min(1).max(200),
-});
+}).strict();
 
 export async function wasteRoutes(app: FastifyInstance) {
   app.get("/api/waste-items", async (request) => {
@@ -17,7 +17,7 @@ export async function wasteRoutes(app: FastifyInstance) {
     return { items: await findWasteItems(query.query, query.limit) };
   });
 
-  app.post("/api/classify", async (request) => {
+  app.post("/api/classify", { config: { rateLimit: { max: 30, timeWindow: "1 minute" } } }, async (request) => {
     const { query } = classifySchema.parse(request.body);
     return { results: await classifyWaste(query) };
   });

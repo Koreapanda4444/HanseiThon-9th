@@ -1,75 +1,239 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
-import { ArrowLeft, Clock3, ExternalLink, Footprints, LocateFixed, MapPin, Navigation, TriangleAlert } from "lucide-react";
+import { ArrowLeft, Building2, Clock3, LocateFixed, LoaderCircle, MapPin, Navigation, Route, TriangleAlert, X } from "lucide-react";
 import Link from "next/link";
+import { useDeferredValue, useState, type FocusEvent } from "react";
 import { KakaoMap } from "@/components/map/kakao-map";
-import { fetchFacility } from "@/lib/api";
-import { formatDistance } from "@/lib/utils";
-import type { Facility } from "@/types/domain";
+import { ApiError, fetchDirections, fetchFacility, searchPlaces } from "@/lib/api";
+import { cn } from "@/lib/utils";
+import type { Facility, PlaceSearchResult } from "@/types/domain";
 
-export function DirectionsExperience({ id }: { id: string }) {
-  const facilityQuery = useQuery({
-    queryKey: ["facility", id],
-    queryFn: () => fetchFacility(id),
-    retry: false,
-  });
-
-  if (facilityQuery.isPending) {
-    return <div className="h-dvh animate-pulse bg-[#eef2ef]" />;
-  }
-
-  if (facilityQuery.isError) {
-    return (
-      <div className="grid h-dvh place-items-center bg-white px-4">
-        <div className="max-w-sm text-center"><TriangleAlert className="mx-auto size-7 text-rose-500" /><h1 className="mt-4 text-[18px] font-black">목적지 정보를 불러오지 못했습니다.</h1><Link href="/" className="mt-5 inline-flex rounded-xl bg-[var(--brand)] px-4 py-2.5 text-[12px] font-extrabold text-white">지도로 돌아가기</Link></div>
-      </div>
-    );
-  }
-
-  return <DirectionsView facility={facilityQuery.data} />;
+export interface RoutePoint {
+  id: string;
+  name: string;
+  address: string;
+  latitude: number;
+  longitude: number;
+  facilityId?: string;
 }
 
-export function DirectionsView({ facility }: { facility: Facility }) {
-  const destination = `${facility.name},${facility.coordinates.latitude},${facility.coordinates.longitude}`;
-  const directionsUrl = `https://map.kakao.com/link/to/${encodeURIComponent(destination)}`;
-  const placeUrl = `https://map.kakao.com/link/map/${encodeURIComponent(destination)}`;
+interface RouteRequest {
+  origin: RoutePoint;
+  destination: RoutePoint;
+}
+
+function placeToRoutePoint(place: PlaceSearchResult): RoutePoint {
+  return {
+    id: `place-${place.id}`,
+    name: place.name,
+    address: place.roadAddress || place.address,
+    latitude: place.coordinates.latitude,
+    longitude: place.coordinates.longitude,
+  };
+}
+
+function formatDistance(distanceM: number) {
+  if (distanceM < 1000) return `${Math.round(distanceM)}m`;
+  return `${(distanceM / 1000).toFixed(distanceM >= 10_000 ? 0 : 1)}km`;
+}
+
+function formatDuration(durationS: number) {
+  const minutes = Math.max(1, Math.ceil(durationS / 60));
+  if (minutes < 60) return `${minutes}분`;
+  const hours = Math.floor(minutes / 60);
+  const remainder = minutes % 60;
+  return remainder ? `${hours}시간 ${remainder}분` : `${hours}시간`;
+}
+
+function RouteField({ label, value, point, onValueChange, onSelect, onUseLocation, locationPending }: {
+  label: string;
+  value: string;
+  point: RoutePoint | null;
+  onValueChange: (value: string) => void;
+  onSelect: (point: RoutePoint) => void;
+  onUseLocation?: () => void;
+  locationPending?: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const deferredValue = useDeferredValue(value.trim());
+  const resultsQuery = useQuery({
+    queryKey: ["route-place-search", deferredValue],
+    queryFn: () => searchPlaces(deferredValue, null, 3),
+    enabled: open && deferredValue.length >= 2 && !point,
+    staleTime: 30_000,
+  });
+
+  function handleBlur(event: FocusEvent<HTMLDivElement>) {
+    if (!event.currentTarget.contains(event.relatedTarget)) setOpen(false);
+  }
+
+  return (
+    <div className="relative" onFocusCapture={() => setOpen(true)} onBlurCapture={handleBlur}>
+      <label className="block text-[10px] font-bold text-[var(--sub)]">{label}
+        <span className={cn("mt-1.5 flex h-11 items-center rounded-xl border bg-white px-3", point ? "border-[var(--brand)]" : "border-[var(--line)] focus-within:border-[var(--brand)]")}>
+          {label === "출발지" ? <Navigation className="size-4 shrink-0 text-blue-600" /> : <MapPin className="size-4 shrink-0 text-[var(--brand-deep)]" />}
+          <input value={value} onChange={(event) => onValueChange(event.target.value)} className="h-full min-w-0 flex-1 px-2.5 text-[12px] font-semibold text-[var(--ink)] outline-none" placeholder={`${label} 검색`} autoComplete="off" />
+          {value && <button type="button" onClick={() => onValueChange("")} aria-label={`${label} 지우기`} className="grid size-7 place-items-center text-[var(--faint)]"><X className="size-3.5" /></button>}
+          {onUseLocation && <button type="button" onClick={onUseLocation} disabled={locationPending} className="ml-1 grid size-8 place-items-center rounded-lg bg-[#edf4ff] text-blue-600 disabled:opacity-50" aria-label="현재 위치를 출발지로 설정">{locationPending ? <LoaderCircle className="size-4 animate-spin" /> : <LocateFixed className="size-4" />}</button>}
+        </span>
+      </label>
+      {open && !point && value.trim().length >= 2 && (
+        <div className="absolute inset-x-0 top-[calc(100%+5px)] z-50 overflow-hidden rounded-xl border border-[var(--line)] bg-white shadow-[0_10px_24px_rgba(28,42,36,0.14)]">
+          {resultsQuery.isPending && <div className="space-y-2 p-3"><div className="h-10 animate-pulse rounded-lg bg-[#eef2ef]" /><div className="h-10 animate-pulse rounded-lg bg-[#eef2ef]" /></div>}
+          {resultsQuery.data?.map((place) => <button key={place.id} type="button" onClick={() => { onSelect(placeToRoutePoint(place)); setOpen(false); }} className="flex w-full items-start gap-2.5 border-b border-[var(--line-soft)] px-3 py-2.5 text-left last:border-b-0 hover:bg-[#f7faf8]"><MapPin className="mt-0.5 size-3.5 shrink-0 text-[var(--brand-deep)]" /><span className="min-w-0"><strong className="block truncate text-[11px] text-[var(--ink)]">{place.name}</strong><span className="mt-0.5 block truncate text-[9px] text-[var(--sub)]">{place.roadAddress || place.address}</span></span></button>)}
+          {!resultsQuery.isPending && resultsQuery.data?.length === 0 && <p className="px-3 py-4 text-center text-[10px] text-[var(--sub)]">검색 결과가 없습니다.</p>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+export function DirectionsPlanner({ initialDestination, backHref, facility }: {
+  initialDestination: RoutePoint;
+  backHref: string;
+  facility?: Facility;
+}) {
+  const [origin, setOrigin] = useState<RoutePoint | null>(null);
+  const [destination, setDestination] = useState<RoutePoint | null>(initialDestination);
+  const [originValue, setOriginValue] = useState("");
+  const [destinationValue, setDestinationValue] = useState(initialDestination.name);
+  const [locationPending, setLocationPending] = useState(false);
+  const [locationError, setLocationError] = useState("");
+  const [routeRequest, setRouteRequest] = useState<RouteRequest | null>(null);
+  const activeRouteQuery = useQuery({
+    queryKey: ["directions-active", routeRequest?.origin.latitude, routeRequest?.origin.longitude, routeRequest?.destination.latitude, routeRequest?.destination.longitude],
+    queryFn: () => fetchDirections(routeRequest!.origin, routeRequest!.destination),
+    enabled: Boolean(routeRequest),
+    retry: false,
+    staleTime: 60_000,
+  });
+
+  function clearRoute() {
+    setRouteRequest(null);
+  }
+
+  function updateOriginValue(value: string) {
+    setOriginValue(value);
+    setOrigin(null);
+    setLocationError("");
+    clearRoute();
+  }
+
+  function updateDestinationValue(value: string) {
+    setDestinationValue(value);
+    setDestination(null);
+    clearRoute();
+  }
+
+  function useCurrentLocation() {
+    if (!navigator.geolocation) {
+      setLocationError("현재 위치를 사용할 수 없습니다.");
+      return;
+    }
+    setLocationPending(true);
+    setLocationError("");
+    navigator.geolocation.getCurrentPosition((position) => {
+      const point: RoutePoint = {
+        id: "current-location",
+        name: "현재 위치",
+        address: "기기 위치",
+        latitude: position.coords.latitude,
+        longitude: position.coords.longitude,
+      };
+      setOrigin(point);
+      setOriginValue(point.name);
+      setLocationPending(false);
+      clearRoute();
+    }, () => {
+      setLocationError("위치 권한을 확인해 주세요.");
+      setLocationPending(false);
+    }, { enableHighAccuracy: true, timeout: 8000, maximumAge: 30_000 });
+  }
+
+  function requestRoute() {
+    if (!origin || !destination) return;
+    const sameRoute = routeRequest
+      && routeRequest.origin.latitude === origin.latitude
+      && routeRequest.origin.longitude === origin.longitude
+      && routeRequest.destination.latitude === destination.latitude
+      && routeRequest.destination.longitude === destination.longitude;
+    if (sameRoute) {
+      void activeRouteQuery.refetch();
+      return;
+    }
+    setRouteRequest({ origin, destination });
+  }
+
+  const originalFacilitySelected = Boolean(facility && destination?.facilityId === facility.id);
+  const mapFacilities = originalFacilitySelected && facility ? [facility] : [];
+  const focusedPlace = destination && !originalFacilitySelected ? { latitude: destination.latitude, longitude: destination.longitude, title: destination.name } : null;
+  const route = activeRouteQuery.data;
+  const canSearch = Boolean(origin && destination);
+  const routeError = activeRouteQuery.error instanceof ApiError ? activeRouteQuery.error.message : "경로를 불러오지 못했습니다.";
+  const buttonText = !destination ? "목적지를 선택해 주세요" : !origin ? "출발지를 선택해 주세요" : activeRouteQuery.isFetching ? "경로 계산 중" : route ? "경로 다시 찾기" : "경로 찾기";
 
   return (
     <div className="flex min-h-dvh flex-col bg-white lg:flex-row">
-      <aside className="relative z-30 order-2 flex flex-1 flex-col bg-white lg:order-1 lg:w-[420px] lg:flex-none lg:border-r lg:border-[var(--line)]">
-        <header className="flex items-center gap-3 border-b border-[var(--line)] px-4 py-4 sm:px-6">
-          <Link href={`/facility/${facility.id}`} aria-label="길찾기 닫기" className="grid size-10 place-items-center rounded-full bg-[var(--surface-muted)]"><ArrowLeft className="size-5" /></Link>
-          <div className="min-w-0"><p className="text-[11px] font-bold text-[var(--brand-deep)]">길찾기</p><h1 className="truncate text-[16px] font-black">{facility.name}</h1></div>
+      <aside className="relative z-30 order-2 flex flex-1 flex-col overflow-hidden bg-white lg:order-1 lg:w-[390px] lg:flex-none lg:border-r lg:border-[var(--line)]">
+        <header className="flex shrink-0 items-center gap-3 border-b border-[var(--line)] px-4 py-4 sm:px-5">
+          <Link href={backHref} aria-label="길찾기 닫기" className="grid size-9 place-items-center rounded-full bg-[var(--surface-muted)]"><ArrowLeft className="size-4.5" /></Link>
+          <div><p className="text-[10px] font-bold text-[var(--brand-deep)]">길찾기</p><h1 className="text-[15px] font-extrabold">출발지와 목적지 설정</h1></div>
         </header>
 
-        <div className="p-4 sm:p-6">
-          <div className="rounded-[22px] bg-[#12392f] p-5 text-white">
-            <div className="flex items-start justify-between"><div><p className="text-[11px] font-bold text-[#78dab4]">목적지</p><p className="mt-1 text-[21px] font-black leading-snug tracking-[-0.04em]">{facility.name}</p></div><span className="grid size-11 place-items-center rounded-2xl bg-white/10 text-[#7de0b9]"><Navigation className="size-5 fill-current" /></span></div>
-            <div className="mt-4 flex flex-wrap items-center gap-4 text-[12px] text-white/65"><span className="flex items-center gap-1"><Footprints className="size-4" /> {formatDistance(facility.distanceM)}</span>{facility.walkMinutes !== null && <span className="flex items-center gap-1"><Clock3 className="size-4" /> 도보 약 {facility.walkMinutes}분</span>}</div>
+        <div className="no-scrollbar min-h-0 flex-1 overflow-y-auto">
+          <div className="space-y-3 p-4 sm:p-5">
+            <RouteField label="출발지" value={originValue} point={origin} onValueChange={updateOriginValue} onSelect={(point) => { setOrigin(point); setOriginValue(point.name); setLocationError(""); clearRoute(); }} onUseLocation={useCurrentLocation} locationPending={locationPending} />
+            <RouteField label="목적지" value={destinationValue} point={destination} onValueChange={updateDestinationValue} onSelect={(point) => { setDestination(point); setDestinationValue(point.name); clearRoute(); }} />
+            {locationError && <p role="alert" className="text-[10px] font-semibold text-rose-600">{locationError}</p>}
           </div>
 
-          <section className="mt-5 rounded-[22px] border border-[var(--line)] p-5">
-            <h2 className="text-[14px] font-black">장소 정보</h2>
-            <p className="mt-3 flex gap-2 text-[12px] leading-5 text-[var(--sub)]"><MapPin className="mt-0.5 size-4 shrink-0 text-[var(--brand)]" /><span>{facility.address}{facility.detailLocation && <span className="mt-1 block text-[var(--faint)]">{facility.detailLocation}</span>}</span></p>
-            <p className="mt-4 rounded-2xl bg-[var(--surface-muted)] p-4 text-[11px] leading-5 text-[var(--sub)]">실제 보행 경로와 예상 시간은 카카오맵에서 현재 교통 상황을 기준으로 확인합니다.</p>
-          </section>
+          {destination && (
+            <section className="mx-4 border-t border-[var(--line-soft)] py-4 sm:mx-5">
+              <div className="flex items-start gap-3"><span className="grid size-9 shrink-0 place-items-center rounded-lg bg-[var(--brand-soft)] text-[var(--brand-deep)]">{destination.facilityId ? <Navigation className="size-4" /> : <Building2 className="size-4" />}</span><div className="min-w-0"><p className="truncate text-[12px] font-extrabold text-[var(--ink)]">{destination.name}</p><p className="mt-1 text-[10px] leading-4 text-[var(--sub)]">{destination.address}</p></div></div>
+            </section>
+          )}
 
-          <div className="mt-4 grid grid-cols-2 gap-2">
-            <a href={placeUrl} target="_blank" rel="noreferrer" className="flex h-11 items-center justify-center gap-1.5 rounded-xl border border-[var(--line)] text-[11px] font-extrabold">장소 보기 <ExternalLink className="size-3.5" /></a>
-            <Link href={`/facility/${facility.id}`} className="flex h-11 items-center justify-center rounded-xl border border-[var(--line)] text-[11px] font-extrabold">상세 정보</Link>
-          </div>
+          {routeRequest && activeRouteQuery.isPending && <div className="mx-4 mb-4 rounded-xl border border-[var(--line)] bg-[#f8faf9] p-5 text-center sm:mx-5"><LoaderCircle className="mx-auto size-5 animate-spin text-[var(--brand)]" /><p className="mt-2 text-[11px] font-bold text-[var(--sub)]">도로 경로를 계산하고 있습니다.</p></div>}
+
+          {routeRequest && activeRouteQuery.isError && <div className="mx-4 mb-4 rounded-xl border border-rose-100 bg-rose-50 p-4 sm:mx-5"><div className="flex gap-2"><TriangleAlert className="mt-0.5 size-4 shrink-0 text-rose-500" /><p className="text-[11px] font-semibold leading-5 text-rose-700">{routeError}</p></div></div>}
+
+          {route && (
+            <section className="mx-4 mb-5 overflow-hidden rounded-2xl border border-[var(--line)] sm:mx-5">
+              <div className="bg-[#f2faf6] p-4">
+                <div className="flex items-center gap-2 text-[10px] font-extrabold text-[var(--brand-deep)]"><Route className="size-4" />자동차 추천 경로</div>
+                <div className="mt-3 flex items-end gap-3"><strong className="text-[24px] font-black tracking-[-0.04em] text-[var(--ink)]">{formatDuration(route.durationS)}</strong><span className="pb-1 text-[12px] font-bold text-[var(--sub)]">{formatDistance(route.distanceM)}</span></div>
+                {(route.tollFare > 0 || route.taxiFare > 0) && <p className="mt-2 text-[10px] text-[var(--sub)]">{route.tollFare > 0 && `통행료 ${route.tollFare.toLocaleString()}원`}{route.tollFare > 0 && route.taxiFare > 0 && " · "}{route.taxiFare > 0 && `예상 택시비 ${route.taxiFare.toLocaleString()}원`}</p>}
+              </div>
+              <div className="border-t border-[var(--line-soft)] px-4 py-3"><h2 className="flex items-center gap-1.5 text-[11px] font-extrabold"><Clock3 className="size-3.5 text-[var(--brand)]" />경로 안내</h2></div>
+              <ol className="divide-y divide-[var(--line-soft)]">
+                {route.steps.map((step, index) => <li key={step.id} className="flex gap-3 px-4 py-3"><span className="grid size-6 shrink-0 place-items-center rounded-full bg-[var(--brand-soft)] text-[9px] font-black text-[var(--brand-deep)]">{index + 1}</span><div className="min-w-0"><p className="text-[11px] font-bold leading-5 text-[var(--ink)]">{step.instruction}</p>{step.distanceM > 0 && <p className="mt-0.5 text-[9px] text-[var(--faint)]">{formatDistance(step.distanceM)}</p>}</div></li>)}
+              </ol>
+            </section>
+          )}
         </div>
 
-        <div className="mt-auto border-t border-[var(--line)] p-4 sm:p-5">
-          <a href={directionsUrl} target="_blank" rel="noreferrer" className="flex h-13 w-full items-center justify-center gap-2 rounded-2xl bg-[var(--brand)] text-[13px] font-extrabold text-white"><LocateFixed className="size-4" /> 카카오맵에서 경로 열기</a>
+        <div className="shrink-0 border-t border-[var(--line)] p-4 sm:p-5">
+          <button type="button" disabled={!canSearch || activeRouteQuery.isFetching} onClick={requestRoute} className="flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-[var(--brand)] text-[12px] font-extrabold text-white disabled:bg-[#b8c2bd]"><Navigation className="size-4" />{buttonText}</button>
         </div>
       </aside>
 
       <section className="relative order-1 h-[42dvh] min-h-[300px] lg:order-2 lg:h-dvh lg:flex-1">
-        <KakaoMap facilities={[facility]} selectedId={facility.id} onSelect={() => undefined} className="size-full" />
-        <Link href={`/facility/${facility.id}`} className="absolute left-4 top-[max(14px,env(safe-area-inset-top))] z-40 grid size-11 place-items-center rounded-full bg-white text-[var(--ink)] shadow-lg lg:hidden" aria-label="장소 상세로 돌아가기"><ArrowLeft className="size-5" /></Link>
+        <KakaoMap facilities={mapFacilities} selectedId={originalFacilitySelected && facility ? facility.id : null} onSelect={() => undefined} userLocation={origin ? { latitude: origin.latitude, longitude: origin.longitude } : null} focusedPlace={focusedPlace} routePath={route?.points} className="size-full" />
+        <Link href={backHref} className="absolute left-4 top-[max(14px,env(safe-area-inset-top))] z-40 grid size-11 place-items-center rounded-full bg-white text-[var(--ink)] shadow-lg lg:hidden" aria-label="뒤로 가기"><ArrowLeft className="size-5" /></Link>
       </section>
     </div>
   );
+}
+
+export function DirectionsExperience({ id }: { id: string }) {
+  const facilityQuery = useQuery({ queryKey: ["facility", id], queryFn: () => fetchFacility(id), retry: false });
+
+  if (facilityQuery.isPending) return <div className="h-dvh animate-pulse bg-[#eef2ef]" />;
+  if (facilityQuery.isError) {
+    return <div className="grid h-dvh place-items-center bg-white px-4"><div className="max-w-sm text-center"><TriangleAlert className="mx-auto size-7 text-rose-500" /><h1 className="mt-4 text-[18px] font-black">목적지 정보를 불러오지 못했습니다.</h1><Link href="/" className="mt-5 inline-flex rounded-xl bg-[var(--brand)] px-4 py-2.5 text-[12px] font-extrabold text-white">지도로 돌아가기</Link></div></div>;
+  }
+
+  const facility = facilityQuery.data;
+  return <DirectionsPlanner facility={facility} backHref={`/facility/${facility.id}`} initialDestination={{ id: `facility-${facility.id}`, facilityId: facility.id, name: facility.name, address: `${facility.address}${facility.detailLocation ? ` ${facility.detailLocation}` : ""}`, latitude: facility.coordinates.latitude, longitude: facility.coordinates.longitude }} />;
 }

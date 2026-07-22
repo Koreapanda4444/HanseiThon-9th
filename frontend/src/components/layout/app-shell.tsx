@@ -22,7 +22,7 @@ function isActive(pathname: string, href: string) {
 
 export function AppShell({ children }: { children: ReactNode }) {
   const pathname = usePathname();
-  const hideNavigation = pathname.startsWith("/directions/");
+  const hideNavigation = pathname.startsWith("/directions");
 
   return (
     <div className="min-h-dvh bg-[var(--app-bg)]">

@@ -4,6 +4,7 @@ import type {
   WasteItem,
 } from "../domain.js";
 import type { FacilityFilters } from "../repositories/facility-repository.js";
+import { aggregateFacilityClusters, type FacilityClusterFilters } from "../services/facility-cluster-service.js";
 import { env } from "../config/env.js";
 import { loadCsvFacilities, resolveCsvDirectory } from "./csv-sources.js";
 import { prepareImport } from "./normalize.js";
@@ -157,6 +158,11 @@ export async function findLocalFacilities(filters: FacilityFilters) {
       return secondUpdated - firstUpdated || first.name.localeCompare(second.name, "ko-KR");
     });
   return filters.limit === undefined ? facilities : facilities.slice(0, filters.limit);
+}
+
+export async function findLocalFacilityClusters(filters: FacilityClusterFilters) {
+  const store = await initializeLocalStore();
+  return aggregateFacilityClusters(store.facilities, filters);
 }
 
 export async function findLocalFacilityById(id: number) {

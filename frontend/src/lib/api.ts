@@ -1,8 +1,12 @@
 import type {
   Account,
   ClassificationResult,
+  DirectionsRoute,
   Facility,
+  FacilityCluster,
   FacilityCategoryId,
+  ImageAnalysisItem,
+  PlaceImage,
   PlaceSearchResult,
   ServiceHealth,
   ServiceStats,
@@ -16,7 +20,7 @@ function apiBaseUrl() {
   if (typeof window === "undefined") return API_BASE_URL;
   const url = new URL(API_BASE_URL);
   const localHosts = ["localhost", "127.0.0.1"];
-  if (localHosts.includes(url.hostname) && localHosts.includes(window.location.hostname)) {
+  if (localHosts.includes(url.hostname)) {
     url.hostname = window.location.hostname;
   }
   return url.toString().replace(/\/$/, "");
@@ -42,6 +46,8 @@ interface ErrorPayload {
 
 async function apiRequest<T>(path: string, init?: RequestInit) {
   let response: Response;
+  const method = (init?.method || "GET").toUpperCase();
+  const stateChanging = !["GET", "HEAD", "OPTIONS"].includes(method);
   try {
     response = await fetch(`${apiBaseUrl()}${path}`, {
       ...init,
@@ -49,10 +55,12 @@ async function apiRequest<T>(path: string, init?: RequestInit) {
       headers: {
         Accept: "application/json",
         ...(init?.body ? { "Content-Type": "application/json" } : {}),
+        ...(stateChanging ? { "X-Requested-With": "beoril-map" } : {}),
         ...init?.headers,
       },
     });
-  } catch {
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") throw error;
     throw new ApiError("현재 서비스를 이용할 수 없습니다. 잠시 후 다시 시도해 주세요.", 0, "NETWORK_ERROR");
   }
 
@@ -81,7 +89,7 @@ export interface FacilityFilters {
   limit?: number;
 }
 
-export async function fetchFacilities(filters: FacilityFilters = {}) {
+export async function fetchFacilities(filters: FacilityFilters = {}, signal?: AbortSignal) {
   const params = new URLSearchParams();
   if (filters.categoryId && filters.categoryId !== "all") params.set("categoryId", filters.categoryId);
   if (filters.query) params.set("query", filters.query);
@@ -95,8 +103,30 @@ export async function fetchFacilities(filters: FacilityFilters = {}) {
   if (filters.north !== undefined) params.set("north", String(filters.north));
   if (filters.limit !== undefined) params.set("limit", String(filters.limit));
   const suffix = params.size ? `?${params.toString()}` : "";
-  const response = await apiRequest<{ facilities: Facility[] }>(`/api/facilities${suffix}`);
+  const response = await apiRequest<{ facilities: Facility[] }>(`/api/facilities${suffix}`, { signal });
   return response.facilities;
+}
+
+export async function fetchFacilityClusters(filters: {
+  categoryId?: FacilityCategoryId | "all";
+  west: number;
+  south: number;
+  east: number;
+  north: number;
+  columns: number;
+  rows: number;
+}, signal?: AbortSignal) {
+  const params = new URLSearchParams({
+    west: String(filters.west),
+    south: String(filters.south),
+    east: String(filters.east),
+    north: String(filters.north),
+    columns: String(filters.columns),
+    rows: String(filters.rows),
+  });
+  if (filters.categoryId && filters.categoryId !== "all") params.set("categoryId", filters.categoryId);
+  const response = await apiRequest<{ clusters: FacilityCluster[] }>(`/api/facility-clusters?${params.toString()}`, { signal });
+  return response.clusters;
 }
 
 export async function fetchFacility(id: string) {
@@ -104,14 +134,32 @@ export async function fetchFacility(id: string) {
   return response.facility;
 }
 
-export async function searchPlaces(query: string, location?: { latitude: number; longitude: number } | null) {
+export async function searchPlaces(query: string, location?: { latitude: number; longitude: number } | null, limit = 15) {
   const params = new URLSearchParams({ query });
+  params.set("limit", String(limit));
   if (location) {
     params.set("latitude", String(location.latitude));
     params.set("longitude", String(location.longitude));
   }
   const response = await apiRequest<{ results: PlaceSearchResult[] }>(`/api/places?${params.toString()}`);
   return response.results;
+}
+
+export async function fetchPlaceImage(query: string) {
+  const params = new URLSearchParams({ query });
+  const response = await apiRequest<{ result: PlaceImage | null }>(`/api/place-image?${params.toString()}`);
+  return response.result;
+}
+
+export async function fetchDirections(origin: { latitude: number; longitude: number }, destination: { latitude: number; longitude: number }) {
+  const params = new URLSearchParams({
+    originLatitude: String(origin.latitude),
+    originLongitude: String(origin.longitude),
+    destinationLatitude: String(destination.latitude),
+    destinationLongitude: String(destination.longitude),
+  });
+  const response = await apiRequest<{ route: DirectionsRoute }>(`/api/directions?${params.toString()}`);
+  return response.route;
 }
 
 export async function fetchWasteItems() {
@@ -133,6 +181,14 @@ export async function fetchStats() {
 
 export async function fetchHealth() {
   return apiRequest<ServiceHealth>("/health");
+}
+
+export async function analyzeImage(image: string) {
+  const response = await apiRequest<{ items: ImageAnalysisItem[] }>("/api/analyze-image", {
+    method: "POST",
+    body: JSON.stringify({ image }),
+  });
+  return response.items;
 }
 
 export async function fetchCurrentAccount() {
@@ -158,6 +214,20 @@ export async function loginAccount(input: { email: string; password: string }) {
 
 export async function logoutAccount() {
   await apiRequest("/api/auth/logout", { method: "POST" });
+}
+
+export async function changeAccountPassword(input: { currentPassword: string; newPassword: string }) {
+  await apiRequest("/api/auth/password", {
+    method: "PATCH",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function deleteAccount(password: string) {
+  await apiRequest("/api/auth/account", {
+    method: "DELETE",
+    body: JSON.stringify({ password }),
+  });
 }
 
 export async function fetchReports() {

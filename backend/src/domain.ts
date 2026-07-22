@@ -34,6 +34,22 @@ export interface Facility {
   note: string | null;
 }
 
+export interface FacilityCluster {
+  id: string;
+  count: number;
+  categoryId: FacilityCategoryId | null;
+  coordinates: {
+    latitude: number;
+    longitude: number;
+  };
+  bounds: {
+    west: number;
+    south: number;
+    east: number;
+    north: number;
+  };
+}
+
 export interface WasteItem {
   id: string;
   name: string;

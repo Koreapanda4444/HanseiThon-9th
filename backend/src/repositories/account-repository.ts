@@ -1,4 +1,3 @@
-import type { BindParameters } from "oracledb";
 import { mutateLocalAccountData, readLocalAccountData, type StoredAccount } from "../data-import/local-account-store.js";
 import { withConnection } from "../database/oracle.js";
 import type { Account } from "../domain.js";
@@ -79,6 +78,19 @@ async function createOracleAccount(account: AccountCredential) {
 
 async function createOracleSession(tokenHash: string, userId: string, expiresAt: string) {
   await withConnection(async (connection) => {
+    await connection.execute("DELETE FROM auth_sessions WHERE expires_at <= SYSTIMESTAMP");
+    await connection.execute(`
+      DELETE FROM auth_sessions
+      WHERE token_hash IN (
+        SELECT token_hash
+        FROM (
+          SELECT token_hash, ROW_NUMBER() OVER (ORDER BY created_at DESC) session_rank
+          FROM auth_sessions
+          WHERE user_id = :userId
+        )
+        WHERE session_rank >= 10
+      )
+    `, { userId });
     await connection.execute(`
       INSERT INTO auth_sessions (token_hash, user_id, expires_at)
       VALUES (:tokenHash, :userId, :expiresAt)
@@ -113,6 +125,25 @@ async function deleteOracleSession(tokenHash: string) {
   });
 }
 
+async function updateOraclePasswordAndDeleteSessions(userId: string, passwordHash: string) {
+  await withConnection(async (connection) => {
+    await connection.execute(`
+      UPDATE users
+      SET password_hash = :passwordHash, updated_at = SYSTIMESTAMP
+      WHERE id = :userId
+    `, { userId, passwordHash });
+    await connection.execute("DELETE FROM auth_sessions WHERE user_id = :userId", { userId });
+    await connection.commit();
+  });
+}
+
+async function deleteOracleAccount(userId: string) {
+  await withConnection(async (connection) => {
+    await connection.execute("DELETE FROM users WHERE id = :userId", { userId });
+    await connection.commit();
+  });
+}
+
 function findLocalAccountByEmail(email: string) {
   return readLocalAccountData((data) => {
     const account = data.accounts.find((item) => item.email === email);
@@ -134,6 +165,11 @@ function createLocalSession(tokenHash: string, userId: string, expiresAt: string
   return mutateLocalAccountData((data) => {
     const now = Date.now();
     data.sessions = data.sessions.filter((session) => Date.parse(session.expiresAt) > now);
+    const recentSessions = data.sessions
+      .filter((session) => session.userId === userId)
+      .sort((first, second) => Date.parse(second.createdAt) - Date.parse(first.createdAt))
+      .slice(0, 9);
+    data.sessions = data.sessions.filter((session) => session.userId !== userId).concat(recentSessions);
     data.sessions.push({ tokenHash, userId, expiresAt, createdAt: new Date().toISOString() });
   });
 }
@@ -150,6 +186,23 @@ function findLocalAccountBySession(tokenHash: string) {
 function deleteLocalSession(tokenHash: string) {
   return mutateLocalAccountData((data) => {
     data.sessions = data.sessions.filter((session) => session.tokenHash !== tokenHash);
+  });
+}
+
+function updateLocalPasswordAndDeleteSessions(userId: string, passwordHash: string) {
+  return mutateLocalAccountData((data) => {
+    const account = data.accounts.find((item) => item.id === userId);
+    if (!account) throw new AppError("계정을 찾을 수 없습니다.", 404, "ACCOUNT_NOT_FOUND");
+    account.passwordHash = passwordHash;
+    data.sessions = data.sessions.filter((session) => session.userId !== userId);
+  });
+}
+
+function deleteLocalAccount(userId: string) {
+  return mutateLocalAccountData((data) => {
+    data.accounts = data.accounts.filter((account) => account.id !== userId);
+    data.sessions = data.sessions.filter((session) => session.userId !== userId);
+    data.reports = data.reports.filter((report) => report.userId !== userId);
   });
 }
 
@@ -185,5 +238,19 @@ export function deleteSession(tokenHash: string) {
   return runWithDataSource(
     () => deleteOracleSession(tokenHash),
     () => deleteLocalSession(tokenHash),
+  );
+}
+
+export function updatePasswordAndDeleteSessions(userId: string, passwordHash: string) {
+  return runWithDataSource(
+    () => updateOraclePasswordAndDeleteSessions(userId, passwordHash),
+    () => updateLocalPasswordAndDeleteSessions(userId, passwordHash),
+  );
+}
+
+export function deleteAccount(userId: string) {
+  return runWithDataSource(
+    () => deleteOracleAccount(userId),
+    () => deleteLocalAccount(userId),
   );
 }

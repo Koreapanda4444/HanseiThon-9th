@@ -23,9 +23,9 @@ async function activateLocalStore() {
   try {
     await initializeLocalStore();
     mode = "local";
-  } catch (error) {
+  } catch {
     mode = "unavailable";
-    console.error("Local data initialization failed", error);
+    console.error("Local data initialization failed");
   }
 }
 
@@ -42,15 +42,15 @@ export async function initializeDataSource() {
   await initialization;
 }
 
-async function switchToLocal(error: unknown) {
-  console.error("Oracle operation failed; switching data source", error);
+async function switchToLocal() {
+  console.error("Oracle operation failed; switching data source");
   database = {
     configured: oracleConfigured,
     connected: false,
     state: oracleConfigured ? "disconnected" : "unconfigured",
   };
-  await closeDatabase().catch((closeError) => {
-    console.error("Oracle pool close failed", closeError);
+  await closeDatabase().catch(() => {
+    console.error("Oracle pool close failed");
   });
   await activateLocalStore();
 }
@@ -73,7 +73,7 @@ export async function runWithDataSource<T>(
       return await oracleWork();
     } catch (error) {
       if (error instanceof AppError && error.statusCode < 500) throw error;
-      await switchToLocal(error);
+      await switchToLocal();
     }
   }
   if (mode === "local") {

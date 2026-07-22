@@ -73,7 +73,7 @@ export function FacilityDetailView({ facility }: { facility: Facility }) {
           <aside className="space-y-4">
             <div className="rounded-[24px] border border-[var(--line)] bg-white p-5">
               <h2 className="text-[15px] font-black">이곳으로 가기</h2>
-              <p className="mt-1 text-[12px] leading-5 text-[var(--sub)]">카카오맵에서 현재 위치 기준 실제 경로를 확인할 수 있어요.</p>
+              <p className="mt-1 text-[12px] leading-5 text-[var(--sub)]">현재 위치에서 시설까지의 실제 도로 경로를 확인할 수 있어요.</p>
               <Link href={`/directions/${facility.id}`} className="mt-4 flex h-12 w-full items-center justify-center gap-2 rounded-2xl bg-[var(--brand)] text-[13px] font-extrabold text-white shadow-[0_9px_22px_rgba(15,159,110,0.2)]"><Navigation className="size-4 fill-current" /> 길찾기</Link>
               <Link href={`/report?facilityId=${encodeURIComponent(facility.id)}`} className="mt-2 flex h-11 w-full items-center justify-center gap-2 rounded-2xl border border-[var(--line)] text-[12px] font-extrabold text-[var(--ink)]"><Send className="size-4" /> 이 장소 제보하기</Link>
             </div>

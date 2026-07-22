@@ -1,12 +1,14 @@
 import type { BindParameters, Connection } from "oracledb";
 import {
   findLocalFacilities,
+  findLocalFacilityClusters,
   findLocalFacilityById,
   getLocalFacilityStats,
 } from "../data-import/local-store.js";
 import { withConnection } from "../database/oracle.js";
 import { facilityCategoryIds, type Facility, type FacilityCategoryId, type FacilityStatus } from "../domain.js";
 import { runWithDataSource } from "../services/data-source.js";
+import type { FacilityClusterFilters } from "../services/facility-cluster-service.js";
 
 interface FacilityRow {
   id: number | string;
@@ -229,6 +231,73 @@ async function getOracleFacilityStats() {
   });
 }
 
+const facilityClusterCache = new Map<string, { expiresAt: number; value: ReturnType<typeof findLocalFacilityClusters> }>();
+
+async function findOracleFacilityClusters(filters: FacilityClusterFilters) {
+  const longitudeCellSize = (filters.east - filters.west) / filters.columns;
+  const latitudeCellSize = (filters.north - filters.south) / filters.rows;
+  const categoryCondition = filters.categoryId
+    ? `AND EXISTS (
+        SELECT 1 FROM facility_categories cluster_category
+        WHERE cluster_category.facility_id = f.id
+          AND cluster_category.category_id = :categoryId
+      )`
+    : "";
+  return withConnection(async (connection) => {
+    const result = await connection.execute(`
+      SELECT
+        cell_column "columnIndex",
+        cell_row "rowIndex",
+        COUNT(*) "count",
+        AVG(latitude) "latitude",
+        AVG(longitude) "longitude"
+      FROM (
+        SELECT
+          f.latitude latitude,
+          f.longitude longitude,
+          LEAST((:columns - 1), GREATEST(0, FLOOR((f.longitude - :west) / :longitudeCellSize))) cell_column,
+          LEAST((:rows - 1), GREATEST(0, FLOOR((f.latitude - :south) / :latitudeCellSize))) cell_row
+        FROM facilities f
+        WHERE f.longitude BETWEEN :west AND :east
+          AND f.latitude BETWEEN :south AND :north
+          ${categoryCondition}
+      )
+      GROUP BY cell_column, cell_row
+    `, {
+      columns: filters.columns,
+      rows: filters.rows,
+      west: filters.west,
+      south: filters.south,
+      east: filters.east,
+      north: filters.north,
+      longitudeCellSize,
+      latitudeCellSize,
+      ...(filters.categoryId ? { categoryId: filters.categoryId } : {}),
+    });
+    return ((result.rows ?? []) as Array<{
+      columnIndex: number;
+      rowIndex: number;
+      count: number;
+      latitude: number;
+      longitude: number;
+    }>).map((row) => ({
+      id: `${row.rowIndex}:${row.columnIndex}`,
+      count: Number(row.count),
+      categoryId: filters.categoryId ?? null,
+      coordinates: {
+        latitude: Number(row.latitude),
+        longitude: Number(row.longitude),
+      },
+      bounds: {
+        west: filters.west + Number(row.columnIndex) * longitudeCellSize,
+        south: filters.south + Number(row.rowIndex) * latitudeCellSize,
+        east: filters.west + (Number(row.columnIndex) + 1) * longitudeCellSize,
+        north: filters.south + (Number(row.rowIndex) + 1) * latitudeCellSize,
+      },
+    }));
+  });
+}
+
 export function findFacilities(filters: FacilityFilters) {
   return runWithDataSource(
     () => findOracleFacilities(filters),
@@ -241,6 +310,24 @@ export function findFacilityById(id: number) {
     () => findOracleFacilityById(id),
     () => findLocalFacilityById(id),
   );
+}
+
+export function findFacilityClusters(filters: FacilityClusterFilters) {
+  const key = JSON.stringify(filters);
+  const cached = facilityClusterCache.get(key);
+  if (cached && cached.expiresAt > Date.now()) return cached.value;
+  if (cached) facilityClusterCache.delete(key);
+  const value = runWithDataSource(
+    () => findOracleFacilityClusters(filters),
+    () => findLocalFacilityClusters(filters),
+  );
+  if (facilityClusterCache.size >= 128) {
+    const oldestKey = facilityClusterCache.keys().next().value;
+    if (oldestKey !== undefined) facilityClusterCache.delete(oldestKey);
+  }
+  facilityClusterCache.set(key, { expiresAt: Date.now() + 20_000, value });
+  void value.catch(() => facilityClusterCache.delete(key));
+  return value;
 }
 
 export function getFacilityStats() {

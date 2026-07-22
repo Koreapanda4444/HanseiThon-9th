@@ -11,7 +11,7 @@ const reportSchema = z.object({
   facilityId: z.coerce.number().int().positive(),
   reportType: z.enum(reportTypes),
   content: z.string().trim().min(5).max(1000),
-});
+}).strict();
 
 async function withFacilityName(report: Awaited<ReturnType<typeof createReport>>) {
   const facility = await findFacilityById(Number(report.facilityId));
@@ -19,7 +19,7 @@ async function withFacilityName(report: Awaited<ReturnType<typeof createReport>>
 }
 
 export async function reportRoutes(app: FastifyInstance) {
-  app.post("/api/reports", async (request, reply) => {
+  app.post("/api/reports", { config: { rateLimit: { max: 10, timeWindow: "1 hour" } } }, async (request, reply) => {
     const account = await requireAccount(request);
     const input = reportSchema.parse(request.body);
     const facility = await findFacilityById(input.facilityId);
@@ -38,7 +38,7 @@ export async function reportRoutes(app: FastifyInstance) {
     return reply.status(201).send({ report: { ...report, facilityName: facility.name } });
   });
 
-  app.get("/api/reports", async (request) => {
+  app.get("/api/reports", { config: { rateLimit: { max: 60, timeWindow: "1 minute" } } }, async (request) => {
     const account = await requireAccount(request);
     const reports = await listReports(account.id);
     return { reports: await Promise.all(reports.map(withFacilityName)) };

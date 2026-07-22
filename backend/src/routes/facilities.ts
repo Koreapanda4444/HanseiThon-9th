@@ -2,7 +2,7 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { facilityCategoryIds } from "../domain.js";
 import { AppError } from "../errors.js";
-import { findFacilities, findFacilityById, getFacilityStats } from "../repositories/facility-repository.js";
+import { findFacilities, findFacilityById, findFacilityClusters, getFacilityStats } from "../repositories/facility-repository.js";
 
 const optionalNumber = z.preprocess(
   (value) => value === "" || value === undefined ? undefined : value,
@@ -12,7 +12,7 @@ const optionalNumber = z.preprocess(
 const querySchema = z.object({
   categoryId: z.enum(facilityCategoryIds).optional(),
   query: z.string().trim().min(1).max(80).optional(),
-  ids: z.string().trim().regex(/^\d+(\s*,\s*\d+)*$/).optional(),
+  ids: z.string().trim().max(4000).regex(/^\d+(\s*,\s*\d+)*$/).refine((value) => value.split(",").length <= 200).optional(),
   latitude: optionalNumber.pipe(z.number().min(-90).max(90).optional()),
   longitude: optionalNumber.pipe(z.number().min(-180).max(180).optional()),
   radiusM: optionalNumber.pipe(z.number().int().min(50).max(50000).optional()),
@@ -21,7 +21,7 @@ const querySchema = z.object({
   east: optionalNumber.pipe(z.number().min(-180).max(180).optional()),
   north: optionalNumber.pipe(z.number().min(-90).max(90).optional()),
   limit: z.coerce.number().int().min(1).optional(),
-}).superRefine((value, context) => {
+}).strict().superRefine((value, context) => {
   if ((value.latitude === undefined) !== (value.longitude === undefined)) {
     context.addIssue({ code: "custom", message: "latitude와 longitude는 함께 입력해야 합니다." });
   }
@@ -32,6 +32,16 @@ const querySchema = z.object({
 });
 
 const idSchema = z.coerce.number().int().positive();
+
+const clusterQuerySchema = z.object({
+  categoryId: z.enum(facilityCategoryIds).optional(),
+  west: z.coerce.number().min(-180).max(180),
+  south: z.coerce.number().min(-90).max(90),
+  east: z.coerce.number().min(-180).max(180),
+  north: z.coerce.number().min(-90).max(90),
+  columns: z.coerce.number().int().min(4).max(32),
+  rows: z.coerce.number().int().min(4).max(24),
+}).strict().refine((value) => value.west < value.east && value.south < value.north);
 
 export async function facilityRoutes(app: FastifyInstance) {
   app.get("/api/facilities", async (request) => {
@@ -48,8 +58,13 @@ export async function facilityRoutes(app: FastifyInstance) {
     };
   });
 
+  app.get("/api/facility-clusters", async (request) => {
+    const parsed = clusterQuerySchema.parse(request.query);
+    return { clusters: await findFacilityClusters(parsed) };
+  });
+
   app.get("/api/facilities/:id", async (request) => {
-    const { id } = z.object({ id: idSchema }).parse(request.params);
+    const { id } = z.object({ id: idSchema }).strict().parse(request.params);
     const facility = await findFacilityById(id);
     if (!facility) throw new AppError("시설을 찾을 수 없습니다.", 404, "FACILITY_NOT_FOUND");
     return { facility };

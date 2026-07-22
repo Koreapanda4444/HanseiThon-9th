@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { env } from "../config/env.js";
 import type { ReportStatus, ReportType } from "../domain.js";
@@ -75,7 +75,8 @@ export function mutateLocalAccountData<T>(mutator: (data: LocalAccountData) => T
     const draft = structuredClone(current);
     const result = await mutator(draft);
     await mkdir(dirname(filePath), { recursive: true });
-    await writeFile(filePath, `${JSON.stringify(draft, null, 2)}\n`, "utf8");
+    await writeFile(filePath, `${JSON.stringify(draft, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+    await chmod(filePath, 0o600).catch(() => undefined);
     snapshot = draft;
     return result;
   });

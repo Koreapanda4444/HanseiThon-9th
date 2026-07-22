@@ -41,6 +41,22 @@ export interface Facility {
   note: string | null;
 }
 
+export interface FacilityCluster {
+  id: string;
+  count: number;
+  categoryId: FacilityCategoryId | null;
+  coordinates: {
+    latitude: number;
+    longitude: number;
+  };
+  bounds: {
+    west: number;
+    south: number;
+    east: number;
+    north: number;
+  };
+}
+
 export interface WasteItem {
   id: string;
   name: string;
@@ -57,6 +73,20 @@ export interface ClassificationResult {
   disposalTip: string;
 }
 
+export interface ImageAnalysisItem {
+  id: string;
+  name: string;
+  categoryId: FacilityCategoryId;
+  confidence: number;
+  boundingBox: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  };
+  disposalTip: string;
+}
+
 export interface PlaceSearchResult {
   id: string;
   name: string;
@@ -65,11 +95,41 @@ export interface PlaceSearchResult {
   address: string;
   roadAddress: string | null;
   phone: string | null;
+  placeUrl: string | null;
   distanceM: number | null;
   coordinates: {
     latitude: number;
     longitude: number;
   };
+}
+
+export interface PlaceImage {
+  thumbnailUrl: string;
+  imageUrl: string;
+  sourceName: string | null;
+  sourceUrl: string | null;
+}
+
+export interface DirectionsRoute {
+  distanceM: number;
+  durationS: number;
+  taxiFare: number;
+  tollFare: number;
+  points: Array<{
+    latitude: number;
+    longitude: number;
+  }>;
+  steps: Array<{
+    id: string;
+    instruction: string;
+    roadName: string | null;
+    distanceM: number;
+    durationS: number;
+    coordinates: {
+      latitude: number;
+      longitude: number;
+    };
+  }>;
 }
 
 export interface ServiceStats {
@@ -80,15 +140,6 @@ export interface ServiceStats {
 export interface ServiceHealth {
   status: "ok" | "degraded";
   service: string;
-  dataSource: {
-    mode: "oracle" | "local" | "unavailable";
-    available: boolean;
-  };
-  database: {
-    configured: boolean;
-    connected: boolean;
-    state: "unconfigured" | "disconnected" | "connected";
-  };
   timestamp: string;
 }
 

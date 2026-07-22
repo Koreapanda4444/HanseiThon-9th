@@ -1,20 +1,74 @@
 "use client";
 
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { CheckCircle2, ChevronRight, History, Info, LoaderCircle, Search, TriangleAlert, X } from "lucide-react";
+import { Camera, CheckCircle2, ChevronRight, History, ImagePlus, Info, LoaderCircle, LocateFixed, Search, TriangleAlert, X } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type ChangeEvent, type FormEvent } from "react";
 import { FacilityCard } from "@/components/facilities/facility-card";
+import { CameraCapture } from "@/components/search/camera-capture";
+import { PhotoAnalysisFlow, type PreparedImage } from "@/components/search/photo-analysis";
 import { CategoryIcon } from "@/components/ui/category-icon";
 import { PageHeader } from "@/components/ui/page-header";
 import { CATEGORY_BY_ID } from "@/config/facility-categories";
 import { classifyWaste, fetchFacilities, fetchWasteItems } from "@/lib/api";
 import { useAppStore } from "@/store/use-app-store";
 
+function blobDataUrl(blob: Blob) {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => typeof reader.result === "string" ? resolve(reader.result) : reject(new Error("INVALID_IMAGE"));
+    reader.onerror = () => reject(new Error("INVALID_IMAGE"));
+    reader.readAsDataURL(blob);
+  });
+}
+
+async function prepareImage(file: File): Promise<PreparedImage> {
+  if (!file.type.match(/^image\/(jpeg|png|webp)$/)) throw new Error("지원하지 않는 이미지 형식입니다.");
+  if (file.size > 12 * 1024 * 1024) throw new Error("사진은 12MB 이하로 선택해 주세요.");
+  const bitmap = await createImageBitmap(file);
+  if (bitmap.width * bitmap.height > 40_000_000) {
+    bitmap.close();
+    throw new Error("사진 해상도가 너무 큽니다.");
+  }
+  const scale = Math.min(1, 1600 / Math.max(bitmap.width, bitmap.height));
+  const width = Math.max(1, Math.round(bitmap.width * scale));
+  const height = Math.max(1, Math.round(bitmap.height * scale));
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const context = canvas.getContext("2d");
+  if (!context) {
+    bitmap.close();
+    throw new Error("사진을 불러오지 못했습니다.");
+  }
+  context.drawImage(bitmap, 0, 0, width, height);
+  bitmap.close();
+  const blob = await new Promise<Blob>((resolve, reject) => canvas.toBlob((result) => result ? resolve(result) : reject(new Error("사진을 변환하지 못했습니다.")), "image/jpeg", 0.86));
+  if (blob.size > 4 * 1024 * 1024) throw new Error("사진 용량을 줄인 뒤 다시 선택해 주세요.");
+  return {
+    id: `${Date.now()}-${file.name}-${blob.size}`,
+    dataUrl: await blobDataUrl(blob),
+    previewUrl: URL.createObjectURL(blob),
+    width,
+    height,
+  };
+}
+
 export function SearchExperience({ initialQuery = "" }: { initialQuery?: string }) {
   const router = useRouter();
   const [query, setQuery] = useState(initialQuery);
+  const [photo, setPhoto] = useState<PreparedImage | null>(null);
+  const [photoError, setPhotoError] = useState("");
+  const [preparingPhoto, setPreparingPhoto] = useState(false);
+  const [cameraOpen, setCameraOpen] = useState(false);
+  const [userLocation, setUserLocation] = useState<{ latitude: number; longitude: number } | null>(null);
+  const [locationStatus, setLocationStatus] = useState<"idle" | "loading" | "ready" | "unavailable">("idle");
+  const galleryInputRef = useRef<HTMLInputElement>(null);
   const initialSearchDone = useRef(false);
+  const locationRequestStarted = useRef(false);
+  const locationWatchRef = useRef<number | null>(null);
+  const locationTimerRef = useRef<number | null>(null);
+  const locationGenerationRef = useRef(0);
   const recentSearches = useAppStore((state) => state.recentSearches);
   const addRecentSearch = useAppStore((state) => state.addRecentSearch);
   const removeRecentSearch = useAppStore((state) => state.removeRecentSearch);
@@ -24,10 +78,105 @@ export function SearchExperience({ initialQuery = "" }: { initialQuery?: string 
   const availableItems = useQuery({ queryKey: ["waste-items"], queryFn: fetchWasteItems });
   const primaryResult = classification.data?.[0];
   const relatedFacilities = useQuery({
-    queryKey: ["related-facilities", primaryResult?.categoryId],
-    queryFn: () => fetchFacilities({ categoryId: primaryResult?.categoryId, limit: 3 }),
-    enabled: Boolean(primaryResult),
+    queryKey: ["nearby-facilities", primaryResult?.categoryId, userLocation?.latitude, userLocation?.longitude],
+    queryFn: () => fetchFacilities({
+      categoryId: primaryResult?.categoryId,
+      latitude: userLocation?.latitude,
+      longitude: userLocation?.longitude,
+      limit: 3,
+    }),
+    enabled: Boolean(primaryResult && userLocation),
   });
+
+  const stopLocationTracking = useCallback(() => {
+    if (locationWatchRef.current !== null) navigator.geolocation?.clearWatch(locationWatchRef.current);
+    if (locationTimerRef.current !== null) window.clearTimeout(locationTimerRef.current);
+    locationWatchRef.current = null;
+    locationTimerRef.current = null;
+  }, []);
+
+  const requestCurrentLocation = useCallback(() => {
+    if (!navigator.geolocation) {
+      setLocationStatus("unavailable");
+      return;
+    }
+    stopLocationTracking();
+    const generation = ++locationGenerationRef.current;
+    let received = false;
+    let latestTimestamp = 0;
+    setLocationStatus("loading");
+    const update = (position: GeolocationPosition, highAccuracy: boolean) => {
+      if (generation !== locationGenerationRef.current) return;
+      if (position.timestamp < latestTimestamp) return;
+      latestTimestamp = position.timestamp;
+      received = true;
+      setUserLocation({
+        latitude: position.coords.latitude,
+        longitude: position.coords.longitude,
+      });
+      setLocationStatus("ready");
+      if (highAccuracy && position.coords.accuracy <= 40) stopLocationTracking();
+    };
+    const fail = (error: GeolocationPositionError) => {
+      if (generation !== locationGenerationRef.current || error.code !== error.PERMISSION_DENIED) return;
+      stopLocationTracking();
+      setUserLocation(null);
+      setLocationStatus("unavailable");
+    };
+    navigator.geolocation.getCurrentPosition((position) => update(position, false), fail, {
+      enableHighAccuracy: false,
+      timeout: 3500,
+      maximumAge: 300_000,
+    });
+    locationWatchRef.current = navigator.geolocation.watchPosition((position) => update(position, true), fail, {
+      enableHighAccuracy: true,
+      timeout: 15_000,
+      maximumAge: 0,
+    });
+    locationTimerRef.current = window.setTimeout(() => {
+      if (generation !== locationGenerationRef.current) return;
+      stopLocationTracking();
+      if (!received) {
+        setUserLocation(null);
+        setLocationStatus("unavailable");
+      }
+    }, 20_000);
+  }, [stopLocationTracking]);
+
+  useEffect(() => () => {
+    locationGenerationRef.current += 1;
+    stopLocationTracking();
+  }, [stopLocationTracking]);
+
+  useEffect(() => {
+    if (!primaryResult || locationRequestStarted.current) return;
+    locationRequestStarted.current = true;
+    requestCurrentLocation();
+  }, [primaryResult, requestCurrentLocation]);
+
+  useEffect(() => () => {
+    if (photo) URL.revokeObjectURL(photo.previewUrl);
+  }, [photo]);
+
+  async function loadPhoto(file: File) {
+    setPhotoError("");
+    setPreparingPhoto(true);
+    try {
+      setPhoto(await prepareImage(file));
+      return true;
+    } catch (error) {
+      setPhotoError(error instanceof Error ? error.message : "사진을 불러오지 못했습니다.");
+      return false;
+    } finally {
+      setPreparingPhoto(false);
+    }
+  }
+
+  async function handlePhoto(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (file) await loadPhoto(file);
+  }
 
   function runSearch(value: string) {
     const normalized = value.trim();
@@ -55,8 +204,18 @@ export function SearchExperience({ initialQuery = "" }: { initialQuery?: string 
     router.push("/");
   }
 
+  if (photo) {
+    return <PhotoAnalysisFlow image={photo} onClose={() => setPhoto(null)} onRetake={() => { setPhoto(null); setCameraOpen(true); }} onOpenMap={(categoryId) => { setSelectedCategoryId(categoryId); router.push("/"); }} />;
+  }
+
   return (
-    <div className="min-h-[calc(100dvh-138px)] bg-[var(--app-bg)] px-4 py-6 sm:px-6 lg:min-h-[calc(100dvh-68px)] lg:py-9">
+    <>
+      {cameraOpen && <CameraCapture onClose={() => setCameraOpen(false)} onCapture={async (file) => {
+        const accepted = await loadPhoto(file);
+        if (accepted) setCameraOpen(false);
+        return accepted;
+      }} />}
+      <div className="min-h-[calc(100dvh-138px)] bg-[var(--app-bg)] px-4 py-6 sm:px-6 lg:min-h-[calc(100dvh-68px)] lg:py-9">
       <div className="mx-auto max-w-[1040px]">
         <PageHeader title="품목 검색" description="버릴 물건의 이름으로 배출 방법과 수거 장소를 확인하세요." />
 
@@ -67,6 +226,13 @@ export function SearchExperience({ initialQuery = "" }: { initialQuery?: string 
             {query && <button type="button" onClick={() => setQuery("")} aria-label="검색어 지우기" className="grid size-8 shrink-0 place-items-center rounded-full text-[#89938e] hover:bg-white"><X className="size-4" /></button>}
             <button type="submit" disabled={classification.isPending || !query.trim()} className="ml-1 flex h-9 shrink-0 items-center gap-1.5 rounded-lg bg-[var(--brand)] px-4 text-[12px] font-extrabold text-white disabled:bg-[#b6c3bd]">{classification.isPending && <LoaderCircle className="size-3.5 animate-spin" />}검색</button>
           </form>
+          <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-[var(--line-soft)] pt-3">
+            <input ref={galleryInputRef} type="file" accept="image/jpeg,image/png,image/webp" onChange={handlePhoto} className="hidden" />
+            <button type="button" onClick={() => setCameraOpen(true)} disabled={preparingPhoto} className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-[var(--line)] px-3 text-[11px] font-extrabold text-[var(--ink)] hover:bg-[var(--surface-muted)] disabled:opacity-50"><Camera className="size-4 text-[var(--brand-deep)]" />사진 찍기</button>
+            <button type="button" onClick={() => galleryInputRef.current?.click()} disabled={preparingPhoto} className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-[var(--line)] px-3 text-[11px] font-extrabold text-[var(--ink)] hover:bg-[var(--surface-muted)] disabled:opacity-50"><ImagePlus className="size-4 text-[var(--brand-deep)]" />갤러리에서 선택</button>
+            {preparingPhoto && <span className="inline-flex items-center gap-1.5 text-[10px] font-bold text-[var(--sub)]"><LoaderCircle className="size-3.5 animate-spin" />사진 준비 중</span>}
+            {photoError && <p role="alert" className="w-full text-[10px] font-semibold text-rose-600">{photoError}</p>}
+          </div>
         </section>
 
         {!classification.data && !classification.isPending && !classification.isError && (
@@ -108,17 +274,19 @@ export function SearchExperience({ initialQuery = "" }: { initialQuery?: string 
             </section>
 
             <aside className="rounded-[18px] border border-[var(--line)] bg-white p-4">
-              <h2 className="mb-3 text-[14px] font-extrabold">관련 수거함</h2>
+              <h2 className="mb-3 flex items-center gap-1.5 text-[14px] font-extrabold"><LocateFixed className="size-4 text-[var(--brand-deep)]" />내 위치 근처 수거함</h2>
               <div className="space-y-3">
-                {relatedFacilities.isPending && Array.from({ length: 2 }, (_, index) => <div key={index} className="h-36 animate-pulse rounded-xl bg-[#eef2ef]" />)}
-                {relatedFacilities.data?.map((facility) => <FacilityCard key={facility.id} facility={facility} compact />)}
-                {relatedFacilities.isError && <p className="py-8 text-center text-[12px] text-rose-600">관련 시설을 불러오지 못했습니다.</p>}
-                {relatedFacilities.data?.length === 0 && <p className="py-8 text-center text-[12px] text-[var(--sub)]">등록된 수거함이 없습니다.</p>}
+                {(locationStatus === "idle" || locationStatus === "loading" || (locationStatus === "ready" && relatedFacilities.isPending)) && Array.from({ length: 2 }, (_, index) => <div key={index} className="h-36 animate-pulse rounded-xl bg-[#eef2ef]" />)}
+                {locationStatus === "unavailable" && <div className="py-8 text-center"><p className="text-[12px] text-[var(--sub)]">현재 위치를 확인할 수 없습니다.</p><button type="button" onClick={requestCurrentLocation} className="mt-3 rounded-lg border border-[var(--line)] px-3 py-2 text-[11px] font-extrabold text-[var(--brand-deep)]">다시 시도</button></div>}
+                {locationStatus === "ready" && relatedFacilities.data?.map((facility) => <FacilityCard key={facility.id} facility={facility} compact />)}
+                {locationStatus === "ready" && relatedFacilities.isError && <p className="py-8 text-center text-[12px] text-rose-600">주변 수거함을 불러오지 못했습니다.</p>}
+                {locationStatus === "ready" && relatedFacilities.data?.length === 0 && <p className="py-8 text-center text-[12px] text-[var(--sub)]">근처에 등록된 수거함이 없습니다.</p>}
               </div>
             </aside>
           </div>
         )}
       </div>
-    </div>
+      </div>
+    </>
   );
 }
